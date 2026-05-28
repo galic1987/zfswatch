@@ -1,6 +1,12 @@
 pub mod memory;
 
+#[cfg(target_os = "linux")]
+pub mod linux_keyring;
+
 pub use memory::{SecureString, secure_zero};
+
+#[cfg(target_os = "linux")]
+pub use linux_keyring::LinuxKeyring;
 
 use zfswatch_core::Result;
 

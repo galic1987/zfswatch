@@ -12,6 +12,8 @@ use zfswatch_core::{
     protocol::{DaemonRequest, DaemonResponse},
     types::PoolInfo,
 };
+#[cfg(target_os = "linux")]
+use zfswatch_keys::LinuxKeyring;
 use zfswatch_keys::MemoryKeyVault;
 use zfswatch_platform::create_backend;
 use zfswatch_zfs::{DatasetManager, EncryptionManager, PoolManager};
@@ -25,7 +27,7 @@ struct DaemonState {
     #[allow(dead_code)]
     encryption_manager: EncryptionManager,
     #[allow(dead_code)]
-    key_vault: MemoryKeyVault,
+    key_vault: Box<dyn zfswatch_keys::KeyStorage>,
     imported_pools: Vec<PoolInfo>,
 }
 
@@ -66,13 +68,18 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::resolve(None).unwrap_or_default();
     info!("Configuration loaded");
 
-    // Initialize daemon state
+    // Initialize daemon state with platform-appropriate key storage
+    #[cfg(target_os = "linux")]
+    let key_vault: Box<dyn zfswatch_keys::KeyStorage> = Box::new(LinuxKeyring::new());
+    #[cfg(target_os = "macos")]
+    let key_vault: Box<dyn zfswatch_keys::KeyStorage> = Box::new(MemoryKeyVault::new());
+
     let state = Arc::new(Mutex::new(DaemonState {
         config: config.clone(),
         pool_manager: PoolManager::new(),
         dataset_manager: DatasetManager::new(),
         encryption_manager: EncryptionManager::new(),
-        key_vault: MemoryKeyVault::new(),
+        key_vault,
         imported_pools: Vec::new(),
     }));
 
