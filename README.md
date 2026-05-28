@@ -20,36 +20,40 @@ Cross-platform ZFS USB auto-mount and encryption tool for macOS and Linux.
 
 > **Note**: Apple Silicon M2 Max supports USB4/Thunderbolt 4 at 40 Gbps maximum. For 80 Gbps you need M4 Pro/Max or M3 Ultra, or an AMD Threadripper/Minisforum USB4 Ryzen system.
 
-## Installation
-
-### macOS
+## Quick Start
 
 ```bash
-# 1. Install ZFS
+# Clone
+git clone https://github.com/galic1987/zfswatch.git
+cd zfswatch
+```
+
+### macOS (One-command setup)
+
+```bash
+# Install ZFS, build zfswatch, create encrypted pool, benchmark
+sudo bash scripts/setup-macos.sh
+
+# Or manual:
 brew install --cask openzfs
-
-# 2. Approve the kernel extension in System Settings → Privacy & Security
-# 3. Reboot if prompted
-
-# 4. Install zfswatch
-brew tap yourname/zfswatch
-brew install zfswatch
-
-# 5. Start the daemon
+# Approve kext in System Settings → Privacy & Security, then:
+cargo build --release
+sudo cp target/release/zfswatchd target/release/zfswatch /usr/local/bin/
+sudo cp packaging/macos/com.zfswatch.daemon.plist /Library/LaunchDaemons/
 sudo launchctl load /Library/LaunchDaemons/com.zfswatch.daemon.plist
 ```
 
-### Linux (Ubuntu)
+### Linux (One-command setup)
 
 ```bash
-# 1. Install ZFS
-sudo apt update
+# Install ZFS, build zfswatch, create encrypted pool, benchmark
+sudo bash scripts/setup-linux.sh
+
+# Or manual:
 sudo apt install zfsutils-linux zfs-dkms
-
-# 2. Install zfswatch
-sudo dpkg -i zfswatch_0.1.0_amd64.deb
-
-# 3. Start the daemon
+cargo build --release
+sudo cp target/release/zfswatchd target/release/zfswatch /usr/local/bin/
+sudo cp packaging/linux/zfswatchd.service /etc/systemd/system/
 sudo systemctl enable --now zfswatchd
 ```
 
