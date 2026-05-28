@@ -55,10 +55,21 @@ async fn main() -> anyhow::Result<()> {
 
     if !pool_mgr.check_zfs_installed().await? {
         error!("ZFS does not appear to be installed or loaded on this system");
+        error!("Run 'zfswatch doctor' for a full system diagnostic.");
         #[cfg(target_os = "macos")]
-        error!("On macOS, install with: brew install --cask openzfs");
+        {
+            error!("On macOS:");
+            error!("  1. Install:  brew install --cask openzfs");
+            error!("  2. Approve:  System Settings → Privacy & Security → allow OpenZFS");
+            error!("  3. Reboot, then re-run zfswatchd");
+        }
         #[cfg(target_os = "linux")]
-        error!("On Linux, install with: sudo apt install zfsutils-linux");
+        {
+            error!("On Debian/Ubuntu: sudo apt install zfsutils-linux zfs-dkms");
+            error!("On Fedora:        sudo dnf install zfs");
+            error!("On Arch:          sudo pacman -S zfs-utils");
+            error!("Then: sudo modprobe zfs");
+        }
         std::process::exit(1);
     }
 

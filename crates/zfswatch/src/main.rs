@@ -8,6 +8,7 @@ use tokio::net::UnixStream;
 use zfswatch_core::{
     config::Config,
     logging,
+    prereqs::{PrerequisiteChecker, SystemPrerequisiteChecker},
     protocol::{DaemonRequest, DaemonResponse, PoolCreationOptions},
 };
 
@@ -90,6 +91,12 @@ enum Commands {
     /// Start the daemon (for systemd/launchd integration)
     #[command(name = "daemon-start")]
     DaemonStart,
+    /// Run system diagnostics and check prerequisites
+    Doctor {
+        /// Target disk to check (optional)
+        #[arg(short, long)]
+        disk: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -376,6 +383,22 @@ async fn main() -> anyhow::Result<()> {
             println!("Use 'zfswatchd' to start the daemon directly.");
             println!("On macOS: sudo launchctl load /Library/LaunchDaemons/com.zfswatch.daemon.plist");
             println!("On Linux: sudo systemctl start zfswatchd");
+        }
+
+        Commands::Doctor { disk } => {
+            let checker = SystemPrerequisiteChecker::new();
+            match checker.check_all(disk.as_deref()) {
+                Ok(report) => {
+                    report.print();
+                    if !report.overall_ok {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Diagnostic failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 
