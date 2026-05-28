@@ -1,0 +1,31 @@
+[Unit]
+Description=ZFS USB Auto-Mount Daemon
+Documentation=https://github.com/yourname/zfswatch
+After=network.target zfs-import.target
+Wants=zfs-import.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zfswatchd
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zfswatchd
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/zfswatch /var/log
+RuntimeDirectory=zfswatch
+RuntimeDirectoryMode=0750
+
+# Allow access to ZFS devices and USB
+DeviceAllow=/dev/zfs rw
+DeviceAllow=/dev/sd* rw
+DeviceAllow=/dev/disk* rw
+DeviceAllow=/dev/nvme* rw
+
+[Install]
+WantedBy=multi-user.target

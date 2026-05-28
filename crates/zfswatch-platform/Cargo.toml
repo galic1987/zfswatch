@@ -1,0 +1,27 @@
+[package]
+name = "zfswatch-platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+zfswatch-core = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# zbus = "5.5"  # uncomment when implementing D-Bus
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# core-foundation = "0.10"
+# core-foundation-sys = "0.8"
+
+[dev-dependencies]
+tokio-test = "0.4"

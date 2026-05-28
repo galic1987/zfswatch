@@ -1,0 +1,24 @@
+[package]
+name = "zfswatch-keys"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+zfswatch-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+libc = "0.2"
+zeroize = { version = "1.8", features = ["derive", "alloc"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# keyutils = "0.2"  # Linux kernel keyring
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# security-framework = "3.2"  # macOS Keychain
+
+[dev-dependencies]
+tempfile = "3.20"
