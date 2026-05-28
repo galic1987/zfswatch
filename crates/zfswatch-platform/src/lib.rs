@@ -22,3 +22,17 @@ pub fn create_backend() -> Box<dyn PlatformBackend> {
         compile_error!("zfswatch only supports macOS and Linux")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_backend() {
+        let backend = create_backend();
+        #[cfg(target_os = "macos")]
+        assert_eq!(backend.default_socket_path(), std::path::PathBuf::from("/var/run/zfswatch.sock"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(backend.default_socket_path(), std::path::PathBuf::from("/run/zfswatch/zfswatch.sock"));
+    }
+}

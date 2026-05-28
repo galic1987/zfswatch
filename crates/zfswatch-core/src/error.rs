@@ -59,3 +59,38 @@ impl From<serde_json::Error> for Error {
         Error::Protocol(err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        assert!(Error::Io(std::io::Error::new(std::io::ErrorKind::Other, "io fail")).to_string().contains("IO error"));
+        assert!(Error::Config("bad".to_string()).to_string().contains("Configuration error"));
+        assert!(Error::Protocol("bad".to_string()).to_string().contains("Protocol error"));
+        assert!(Error::Zfs("bad".to_string()).to_string().contains("ZFS error"));
+        assert!(Error::Platform("bad".to_string()).to_string().contains("Platform error"));
+        assert!(Error::KeyVault("bad".to_string()).to_string().contains("Key vault error"));
+        assert!(Error::NotFound("x".to_string()).to_string().contains("Not found"));
+        assert!(Error::PermissionDenied("x".to_string()).to_string().contains("Permission denied"));
+        assert!(Error::InvalidArgument("x".to_string()).to_string().contains("Invalid argument"));
+        assert!(Error::CrossPlatform("x".to_string()).to_string().contains("Cross-platform"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
+    fn test_error_from_toml_de() {
+        let toml_err: toml::de::Error = toml::from_str::<Config>("[invalid").unwrap_err();
+        let err: Error = toml_err.into();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    use crate::config::Config;
+}

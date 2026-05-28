@@ -54,6 +54,90 @@ impl fmt::Display for UsbSpeed {
 
 use std::fmt;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_usb_speed_throughput() {
+        assert_eq!(UsbSpeed::Unknown.max_throughput_mbps(), 0);
+        assert_eq!(UsbSpeed::LowSpeed.max_throughput_mbps(), 0);
+        assert_eq!(UsbSpeed::FullSpeed.max_throughput_mbps(), 1);
+        assert_eq!(UsbSpeed::HighSpeed.max_throughput_mbps(), 35);
+        assert_eq!(UsbSpeed::SuperSpeed.max_throughput_mbps(), 450);
+        assert_eq!(UsbSpeed::SuperSpeed10.max_throughput_mbps(), 900);
+        assert_eq!(UsbSpeed::SuperSpeed20.max_throughput_mbps(), 1800);
+        assert_eq!(UsbSpeed::Usb4_40G.max_throughput_mbps(), 3500);
+        assert_eq!(UsbSpeed::Usb4_80G.max_throughput_mbps(), 7000);
+    }
+
+    #[test]
+    fn test_usb_speed_display() {
+        assert!(UsbSpeed::Usb4_40G.to_string().contains("40 Gbps"));
+        assert!(UsbSpeed::Usb4_80G.to_string().contains("80 Gbps"));
+        assert!(UsbSpeed::HighSpeed.to_string().contains("480 Mbps"));
+    }
+
+    #[test]
+    fn test_pool_health_display() {
+        assert_eq!(PoolHealth::Online.to_string(), "ONLINE");
+        assert_eq!(PoolHealth::Degraded.to_string(), "DEGRADED");
+        assert_eq!(PoolHealth::Faulted.to_string(), "FAULTED");
+        assert_eq!(PoolHealth::Offline.to_string(), "OFFLINE");
+        assert_eq!(PoolHealth::Unavailable.to_string(), "UNAVAIL");
+        assert_eq!(PoolHealth::Removed.to_string(), "REMOVED");
+        assert_eq!(PoolHealth::Unknown.to_string(), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_device_info_serialization() {
+        let device = DeviceInfo {
+            device_path: PathBuf::from("/dev/disk5"),
+            stable_id: "usb-WD-123".to_string(),
+            model: "WD_BLACK SN850X".to_string(),
+            vendor_id: Some("Western Digital".to_string()),
+            product_id: None,
+            serial: Some("ABC123".to_string()),
+            usb_speed: UsbSpeed::Usb4_40G,
+            capacity_bytes: Some(8_000_000_000_000),
+            is_removable: true,
+            detected_fs: Some("zfs_member".to_string()),
+        };
+
+        let json = serde_json::to_string(&device).unwrap();
+        assert!(json.contains("WD_BLACK SN850X"));
+        assert!(json.contains("Usb4_40G"));
+
+        let deserialized: DeviceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.model, "WD_BLACK SN850X");
+        assert_eq!(deserialized.usb_speed, UsbSpeed::Usb4_40G);
+    }
+
+    #[test]
+    fn test_pool_info_serialization() {
+        let pool = PoolInfo {
+            name: "tank".to_string(),
+            guid: "123456".to_string(),
+            health: PoolHealth::Online,
+            size_bytes: 1_000_000_000_000,
+            allocated_bytes: 500_000_000_000,
+            free_bytes: 500_000_000_000,
+            encrypted: true,
+            mounted: true,
+            mountpoint: Some(PathBuf::from("/Volumes/tank")),
+            datasets: vec![],
+            features: vec!["encryption".to_string()],
+            version: "2.3".to_string(),
+        };
+
+        let json = serde_json::to_string(&pool).unwrap();
+        assert!(json.contains("tank"));
+        let deserialized: PoolInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "tank");
+        assert_eq!(deserialized.encrypted, true);
+    }
+}
+
 /// Information about a detected USB storage device
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {

@@ -141,42 +141,18 @@ fn default_socket_path() -> PathBuf {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-fn default_false() -> bool {
-    false
-}
-fn default_scan_interval() -> u64 {
-    0
-}
-fn default_encryption_algorithm() -> String {
-    "aes-256-gcm".to_string()
-}
-fn default_keyformat() -> String {
-    "passphrase".to_string()
-}
-fn default_keylocation() -> String {
-    "prompt".to_string()
-}
-fn default_min_passphrase_length() -> usize {
-    12
-}
-fn default_recordsize() -> u64 {
-    128
-}
-fn default_compression() -> String {
-    "zstd".to_string()
-}
-fn default_key_source() -> KeySource {
-    KeySource::Prompt
-}
-fn default_log_level() -> String {
-    "info".to_string()
-}
-fn default_log_format() -> LogFormat {
-    LogFormat::Pretty
-}
+fn default_true() -> bool { true }
+fn default_false() -> bool { false }
+fn default_scan_interval() -> u64 { 0 }
+fn default_encryption_algorithm() -> String { "aes-256-gcm".to_string() }
+fn default_keyformat() -> String { "passphrase".to_string() }
+fn default_keylocation() -> String { "prompt".to_string() }
+fn default_min_passphrase_length() -> usize { 12 }
+fn default_recordsize() -> u64 { 128 }
+fn default_compression() -> String { "zstd".to_string() }
+fn default_key_source() -> KeySource { KeySource::Prompt }
+fn default_log_level() -> String { "info".to_string() }
+fn default_log_format() -> LogFormat { LogFormat::Pretty }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -235,21 +211,18 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from a file path
     pub fn from_file(path: &PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
 
-    /// Save configuration to a file path
     pub fn to_file(&self, path: &PathBuf) -> Result<()> {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
     }
 
-    /// Get the default config path for the platform
     pub fn default_path() -> PathBuf {
         #[cfg(target_os = "macos")]
         {
@@ -261,12 +234,10 @@ impl Config {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            PathBuf::from(".")
-                .join(DEFAULT_CONFIG_NAME)
+            PathBuf::from(".").join(DEFAULT_CONFIG_NAME)
         }
     }
 
-    /// Find config file: explicit path > default system path
     pub fn resolve(path: Option<&PathBuf>) -> Result<Self> {
         if let Some(p) = path {
             return Self::from_file(p);
@@ -276,5 +247,95 @@ impl Config {
             return Self::from_file(&default);
         }
         Ok(Config::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    #[test]
+    fn test_config_defaults() {
+        let config = Config::default();
+        assert_eq!(config.daemon.auto_detect, true);
+        assert_eq!(config.daemon.auto_mount, false);
+        assert_eq!(config.encryption.default_algorithm, "aes-256-gcm");
+        assert_eq!(config.performance.recordsize_kb, 128);
+        assert_eq!(config.performance.compression, "zstd");
+        assert!(config.pools.is_empty());
+    }
+
+    #[test]
+    fn test_config_from_toml() {
+        let toml_str = r#"
+[daemon]
+auto_detect = false
+auto_mount = true
+
+[encryption]
+default_algorithm = "aes-128-gcm"
+min_passphrase_length = 8
+
+[[pools]]
+name = "testpool"
+device_uuid = "usb-test-123"
+auto_import = true
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.daemon.auto_detect, false);
+        assert_eq!(config.daemon.auto_mount, true);
+        assert_eq!(config.encryption.default_algorithm, "aes-128-gcm");
+        assert_eq!(config.encryption.min_passphrase_length, 8);
+    }
+
+    #[test]
+    fn test_config_roundtrip() {
+        let mut config = Config::default();
+        config.pools.push(PoolConfig {
+            name: "mypool".to_string(),
+            device_uuid: Some("uuid-123".to_string()),
+            auto_import: true,
+            auto_mount: false,
+            key_source: KeySource::File,
+            key_file: Some(PathBuf::from("/keys/mypool.key")),
+            key_url: None,
+        });
+
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        config.to_file(&tmpfile.path().to_path_buf()).unwrap();
+
+        let loaded = Config::from_file(&tmpfile.path().to_path_buf()).unwrap();
+        assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_key_source_serialization() {
+        // KeySource serializes to lowercase strings via serde_json
+        assert_eq!(serde_json::to_string(&KeySource::Prompt).unwrap(), "\"prompt\"");
+        assert_eq!(serde_json::to_string(&KeySource::Keyring).unwrap(), "\"keyring\"");
+        assert_eq!(serde_json::to_string(&KeySource::File).unwrap(), "\"file\"");
+        assert_eq!(serde_json::to_string(&KeySource::Https).unwrap(), "\"https\"");
+    }
+
+    #[test]
+    fn test_log_format_serialization() {
+        assert_eq!(serde_json::to_string(&LogFormat::Pretty).unwrap(), "\"pretty\"");
+        assert_eq!(serde_json::to_string(&LogFormat::Json).unwrap(), "\"json\"");
+        assert_eq!(serde_json::to_string(&LogFormat::Compact).unwrap(), "\"compact\"");
+    }
+
+    #[test]
+    fn test_config_invalid_toml() {
+        let result: Result<Config> = toml::from_str("[invalid").map_err(|e| e.into());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_daemon_config_defaults() {
+        let config = DaemonConfig::default();
+        assert_eq!(config.confirm_unknown_pools, true);
+        assert_eq!(config.scan_interval_sec, 0);
     }
 }

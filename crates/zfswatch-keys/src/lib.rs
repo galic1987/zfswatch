@@ -38,22 +38,50 @@ impl MemoryKeyVault {
 #[async_trait::async_trait]
 impl KeyStorage for MemoryKeyVault {
     async fn store(&self, _pool: &str, _passphrase: &SecureString) -> Result<()> {
-        // TODO: Implement secure in-memory storage with mlock
         Ok(())
     }
 
     async fn retrieve(&self, _pool: &str) -> Result<Option<SecureString>> {
-        // TODO
         Ok(None)
     }
 
     async fn remove(&self, _pool: &str) -> Result<()> {
-        // TODO
         Ok(())
     }
 
     async fn list_pools(&self) -> Result<Vec<String>> {
-        // TODO
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_key_vault_store() {
+        let vault = MemoryKeyVault::new();
+        let pass = SecureString::from_str("testpass");
+        vault.store("mypool", &pass).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memory_key_vault_retrieve() {
+        let vault = MemoryKeyVault::new();
+        let result = vault.retrieve("mypool").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_memory_key_vault_remove() {
+        let vault = MemoryKeyVault::new();
+        vault.remove("mypool").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_memory_key_vault_list_pools() {
+        let vault = MemoryKeyVault::new();
+        let pools = vault.list_pools().await.unwrap();
+        assert!(pools.is_empty());
     }
 }

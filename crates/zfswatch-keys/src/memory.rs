@@ -100,6 +100,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_secure_string_creation() {
+        let s = SecureString::new("hello".to_string());
+        assert_eq!(s.as_str(), "hello");
+        assert!(s.is_locked());
+    }
+
+    #[test]
+    fn test_secure_string_from_str() {
+        let s = SecureString::from_str("test_password");
+        assert_eq!(s.as_str(), "test_password");
+    }
+
+    #[test]
     fn test_secure_string_zeroed_on_drop() {
         let s = SecureString::from_str("super_secret_password_12345");
         assert_eq!(s.as_str(), "super_secret_password_12345");
@@ -113,5 +126,43 @@ mod tests {
         let s2 = s1.clone();
         assert_eq!(s1.as_str(), "test");
         assert_eq!(s2.as_str(), "test");
+    }
+
+    #[test]
+    fn test_secure_string_unlock() {
+        let mut s = SecureString::from_str("unlock_test");
+        assert!(s.is_locked());
+        s.unlock();
+        assert!(!s.is_locked());
+    }
+
+    #[test]
+    fn test_secure_string_into_string() {
+        let s = SecureString::from_str("into_test");
+        let plain = s.into_string();
+        assert_eq!(plain, "into_test");
+    }
+
+    #[test]
+    fn test_secure_string_debug() {
+        let s = SecureString::from_str("debug");
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SecureString"));
+        assert!(dbg.contains("len"));
+        assert!(!dbg.contains("debug")); // content should not appear
+    }
+
+    #[test]
+    fn test_secure_zero() {
+        let mut buf = b"secret".to_vec();
+        secure_zero(&mut buf);
+        assert_eq!(buf, vec![0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_secure_zero_string() {
+        let mut s = String::from("secret");
+        secure_zero_string(&mut s);
+        assert_eq!(s, "");
     }
 }

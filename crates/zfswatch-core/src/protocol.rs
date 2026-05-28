@@ -3,6 +3,69 @@ use std::path::PathBuf;
 
 use crate::types::{DeviceInfo, PoolInfo};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_daemon_request_serialization() {
+        let req = DaemonRequest::Ping;
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "\"Ping\"");
+
+        let req = DaemonRequest::ListPools;
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "\"ListPools\"");
+
+        let req = DaemonRequest::ImportPool {
+            pool_name: "tank".to_string(),
+            device_path: Some(PathBuf::from("/dev/sdb")),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"ImportPool\""));
+        assert!(json.contains("tank"));
+    }
+
+    #[test]
+    fn test_daemon_response_serialization() {
+        let resp = DaemonResponse::Pong;
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(json, "\"Pong\"");
+
+        let resp = DaemonResponse::Success { message: "done".to_string() };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("done"));
+
+        let resp = DaemonResponse::Error { code: "E1".to_string(), message: "fail".to_string() };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("E1"));
+        assert!(json.contains("fail"));
+    }
+
+    #[test]
+    fn test_pool_creation_options_default() {
+        let opts = PoolCreationOptions::default();
+        assert_eq!(opts.encryption, true);
+        assert_eq!(opts.algorithm, "aes-256-gcm");
+        assert_eq!(opts.compression, "zstd");
+        assert_eq!(opts.recordsize_kb, 128);
+        assert_eq!(opts.cross_platform_safe, true);
+    }
+
+    #[test]
+    fn test_event_notification_serialization() {
+        let event = EventNotification::PassphraseRequired {
+            pool_name: "tank".to_string(),
+            device_path: PathBuf::from("/dev/sdb"),
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("PassphraseRequired"));
+        assert!(json.contains("tank"));
+    }
+}
+
 /// Messages sent from CLI → Daemon
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DaemonRequest {

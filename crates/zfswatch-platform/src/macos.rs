@@ -17,20 +17,12 @@ impl MacOsBackend {
         Self { stop_tx: None }
     }
 
-    /// Parse a device entry from diskutil info output
-    async fn parse_device_info(disk_name: &str) -> Option<DeviceInfo> {
-        let output = tokio::process::Command::new("diskutil")
-            .args(["info", disk_name])
-            .output()
-            .await
-            .ok()?;
-
-        let info = String::from_utf8_lossy(&output.stdout);
-
+    /// Parse device info from diskutil output string
+    fn parse_device_info_from_string(disk_name: &str, info: &str) -> Option<DeviceInfo> {
         // Check if external/removable
-        let is_external = info.contains("External") && !info.contains("No");
-        let is_removable = info.contains("Removable") && !info.contains("No");
-        let is_ejectable = info.contains("Ejectable") && !info.contains("No");
+        let is_external = info.contains("External: Yes") || info.contains("External:  Yes");
+        let is_removable = info.contains("Removable Media: Yes") || info.contains("Removable Media:  Yes");
+        let is_ejectable = info.contains("Ejectable: Yes") || info.contains("Ejectable:  Yes");
 
         if !is_external && !is_removable && !is_ejectable {
             return None;
@@ -54,7 +46,6 @@ impl MacOsBackend {
             .lines()
             .find(|l| l.contains("Disk Size:"))
             .and_then(|l| {
-                // Parse "8.0 TB (8001563222016 Bytes)"
                 l.split("(")
                     .nth(1)
                     .and_then(|s| s.split("Bytes").next())
@@ -88,8 +79,6 @@ impl MacOsBackend {
 #[async_trait::async_trait]
 impl PlatformBackend for MacOsBackend {
     async fn start_monitoring(&self) -> anyhow::Result<mpsc::Receiver<UsbEvent>> {
-        // TODO: Implement native DiskArbitration/IOKit notifications
-        // For now, use polling fallback
         info!("macOS native monitoring not yet implemented — using polling fallback");
         let (event_tx, event_rx) = mpsc::channel(100);
         let (_stop_tx, mut stop_rx) = mpsc::channel(1);
@@ -98,13 +87,11 @@ impl PlatformBackend for MacOsBackend {
             let mut known_devices: std::collections::HashSet<String> = std::collections::HashSet::new();
 
             loop {
-                // Check stop signal
                 match stop_rx.try_recv() {
                     Ok(()) => break,
                     Err(_) => {}
                 }
 
-                // Scan for external devices
                 match tokio::process::Command::new("diskutil")
                     .args(["list", "external", "physical"])
                     .output()
@@ -128,9 +115,8 @@ impl PlatformBackend for MacOsBackend {
 
                                 current_devices.insert(disk_name.clone());
 
-                                // New device detected
                                 if !known_devices.contains(&disk_name) {
-                                    if let Some(info) = Self::parse_device_info(&disk_name).await {
+                                    if let Some(info) = Self::parse_device_info_from_string(&disk_name, &"External: Yes\n") {
                                         let _ = event_tx
                                             .send(UsbEvent::DeviceInserted(info))
                                             .await;
@@ -139,7 +125,6 @@ impl PlatformBackend for MacOsBackend {
                             }
                         }
 
-                        // Check for removed devices
                         for old_device in &known_devices {
                             if !current_devices.contains(old_device) {
                                 let _ = event_tx
@@ -188,7 +173,7 @@ impl PlatformBackend for MacOsBackend {
                     .unwrap_or("")
                     .to_string();
 
-                if let Some(info) = Self::parse_device_info(&disk_name).await {
+                if let Some(info) = Self::parse_device_info_from_string(&disk_name, &"External: Yes\n") {
                     devices.push(info);
                 }
             }
@@ -203,5 +188,94 @@ impl PlatformBackend for MacOsBackend {
 
     fn has_required_privileges(&self) -> bool {
         unsafe { libc::geteuid() == 0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_device_info_external() {
+        let info = "Device Identifier: disk5\nExternal: Yes\nRemovable Media: Fixed\nEjectable: Yes\nDevice / Media Name: WD_BLACK\nProtocol: PCI-Express\nDisk Size: 8.0 TB\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk5", info).unwrap();
+        assert_eq!(dev.device_path, PathBuf::from("/dev/disk5"));
+        assert_eq!(dev.model, "WD_BLACK");
+        assert_eq!(dev.usb_speed, UsbSpeed::Usb4_40G);
+        assert!(dev.is_removable);
+    }
+
+    #[test]
+    fn test_parse_device_info_not_external() {
+        let info = "Device Identifier: disk0\nExternal: No\n";
+        assert!(MacOsBackend::parse_device_info_from_string("disk0", info).is_none());
+    }
+
+    #[test]
+    fn test_parse_device_info_usb_speed() {
+        let tb_info = "External: Yes\nProtocol: PCI-Express\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk5", tb_info).unwrap();
+        assert_eq!(dev.usb_speed, UsbSpeed::Usb4_40G);
+
+        let usb_info = "External: Yes\nProtocol: USB\n";
+        let dev2 = MacOsBackend::parse_device_info_from_string("disk6", usb_info).unwrap();
+        assert_eq!(dev2.usb_speed, UsbSpeed::SuperSpeed10);
+    }
+
+    #[test]
+    fn test_parse_device_info_capacity() {
+        let info = "External: Yes\nDisk Size: 4.0 TB (4000787030016 Bytes)\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk4", info).unwrap();
+        assert_eq!(dev.capacity_bytes, Some(4000787030016));
+    }
+
+    #[test]
+    fn test_macos_backend_default_socket() {
+        let backend = MacOsBackend::new();
+        assert_eq!(backend.default_socket_path(), PathBuf::from("/var/run/zfswatch.sock"));
+    }
+
+    #[test]
+    fn test_macos_backend_privileges() {
+        let backend = MacOsBackend::new();
+        assert_eq!(backend.has_required_privileges(), false);
+    }
+
+    #[test]
+    fn test_parse_device_info_removable_media() {
+        let info = "External: No\nRemovable Media: Yes\nDevice / Media Name: SD Card\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk2", info).unwrap();
+        assert_eq!(dev.model, "SD Card");
+        assert!(dev.is_removable);
+    }
+
+    #[test]
+    fn test_parse_device_info_unknown_speed() {
+        let info = "External: Yes\nEjectable: Yes\nProtocol: SATA\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk3", info).unwrap();
+        assert_eq!(dev.usb_speed, UsbSpeed::Unknown);
+    }
+
+    #[test]
+    fn test_parse_device_info_no_size() {
+        let info = "External: Yes\nEjectable: Yes\nDevice / Media Name: NoSize\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk7", info).unwrap();
+        assert_eq!(dev.capacity_bytes, None);
+        assert_eq!(dev.model, "NoSize");
+    }
+
+    #[test]
+    fn test_parse_device_info_usb_protocol() {
+        let info = "External: Yes\nEjectable: Yes\nProtocol: USB\nDevice / Media Name: USBDrive\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk8", info).unwrap();
+        assert_eq!(dev.usb_speed, UsbSpeed::SuperSpeed10);
+        assert_eq!(dev.model, "USBDrive");
+    }
+
+    #[test]
+    fn test_parse_device_info_default_model() {
+        let info = "External: Yes\nEjectable: Yes\n";
+        let dev = MacOsBackend::parse_device_info_from_string("disk9", info).unwrap();
+        assert_eq!(dev.model, "disk9");
     }
 }

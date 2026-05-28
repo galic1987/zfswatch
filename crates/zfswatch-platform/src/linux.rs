@@ -247,3 +247,34 @@ impl PlatformBackend for LinuxBackend {
         unsafe { libc::geteuid() == 0 }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_usb_speed() {
+        assert!(matches!(LinuxBackend::parse_usb_speed(0), UsbSpeed::Unknown));
+        assert!(matches!(LinuxBackend::parse_usb_speed(1), UsbSpeed::LowSpeed));
+        assert!(matches!(LinuxBackend::parse_usb_speed(12), UsbSpeed::FullSpeed));
+        assert!(matches!(LinuxBackend::parse_usb_speed(480), UsbSpeed::HighSpeed));
+        assert!(matches!(LinuxBackend::parse_usb_speed(5000), UsbSpeed::SuperSpeed));
+        assert!(matches!(LinuxBackend::parse_usb_speed(10000), UsbSpeed::SuperSpeed10));
+        assert!(matches!(LinuxBackend::parse_usb_speed(20000), UsbSpeed::SuperSpeed20));
+        assert!(matches!(LinuxBackend::parse_usb_speed(40000), UsbSpeed::Usb4_40G));
+        assert!(matches!(LinuxBackend::parse_usb_speed(80000), UsbSpeed::Usb4_80G));
+        assert!(matches!(LinuxBackend::parse_usb_speed(160000), UsbSpeed::Usb4_80G));
+    }
+
+    #[test]
+    fn test_linux_backend_default_socket() {
+        let backend = LinuxBackend::new();
+        assert_eq!(backend.default_socket_path(), PathBuf::from("/run/zfswatch/zfswatch.sock"));
+    }
+
+    #[test]
+    fn test_linux_backend_privileges() {
+        let backend = LinuxBackend::new();
+        assert_eq!(backend.has_required_privileges(), false);
+    }
+}

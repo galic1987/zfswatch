@@ -1,7 +1,5 @@
 use std::path::PathBuf;
-use std::process::Stdio;
 
-use tokio::process::Command;
 use tracing::{info, warn};
 
 use zfswatch_core::{
@@ -10,233 +8,156 @@ use zfswatch_core::{
     Error, Result,
 };
 
+use crate::command::CommandRunner;
+
 /// Conservative feature flags for cross-platform macOS ↔ Linux compatibility.
-/// These are supported by OpenZFS 2.3.x on both platforms.
 const CROSS_PLATFORM_SAFE_FEATURES: &[&str] = &[
-    "allocation_classes",
-    "async_destroy",
-    "bookmarks",
-    "bookmark_v2",
-    "device_rebuild",
-    "edonr",
-    "embedded_data",
-    "empty_bpobj",
-    "encryption",
-    "extensible_dataset",
-    "filesystem_limits",
-    "hole_birth",
-    "large_blocks",
-    "large_dnode",
-    "livelist",
-    "log_spacemap",
-    "lz4_compress",
-    "multi_vdev_crash_dump",
-    "obsolete_counts",
-    "project_quota",
-    "redaction_bookmarks",
-    "redacted_datasets",
-    "resilver_defer",
-    "sha512",
-    "skein",
-    "spacemap_histogram",
-    "spacemap_v2",
-    "userobj_accounting",
-    "zstd_compress",
+    "allocation_classes", "async_destroy", "bookmarks", "bookmark_v2",
+    "device_rebuild", "edonr", "embedded_data", "empty_bpobj",
+    "encryption", "extensible_dataset", "filesystem_limits", "hole_birth",
+    "large_blocks", "large_dnode", "livelist", "log_spacemap", "lz4_compress",
+    "multi_vdev_crash_dump", "obsolete_counts", "project_quota",
+    "redaction_bookmarks", "redacted_datasets", "resilver_defer",
+    "sha512", "skein", "spacemap_histogram", "spacemap_v2",
+    "userobj_accounting", "zstd_compress",
 ];
 
-/// Feature flags to explicitly DISABLE for cross-platform safety.
-/// These may cause issues between macOS and Linux or different ZFS versions.
 const CROSS_PLATFORM_RISKY_FEATURES: &[&str] = &[
-    // Block cloning endian has had macOS-specific issues
-    "block_cloning_endian",
-    // Fast dedup is newer and may not be on all platforms
-    "fast_dedup",
-    // RAIDZ expansion is relatively new
-    "raidz_expansion",
-    // Long names (1023 char) is 2.3+; disable for wider compatibility
-    "longname",
+    "block_cloning_endian", "fast_dedup", "raidz_expansion", "longname",
 ];
 
-/// Manages ZFS pool operations by wrapping zpool/zfs CLI commands.
-#[derive(Debug, Clone)]
-pub struct PoolManager;
+/// Manages ZFS pool operations
+pub struct PoolManager<R: CommandRunner> {
+    runner: R,
+}
 
-impl PoolManager {
-    pub fn new() -> Self {
-        Self
+impl<R: CommandRunner> PoolManager<R> {
+    pub fn new(runner: R) -> Self {
+        Self { runner }
     }
 
-    /// Check if the zpool command is available
     pub async fn check_zfs_installed(&self) -> Result<bool> {
-        match Command::new("zpool").arg("--version").output().await {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
+        match self.runner.run("zpool", &["--version"], None).await {
+            Ok((stdout, _, true)) => {
                 info!("ZFS installed: {}", stdout.trim());
                 Ok(true)
             }
-            Ok(_) => {
-                warn!("zpool command found but returned error — ZFS may not be loaded");
+            Ok((_, _, false)) => {
+                warn!("zpool command found but returned error");
                 Ok(false)
             }
-            Err(e) => {
-                warn!("zpool command not found: {e}");
+            Err(_) => {
+                warn!("zpool command not found");
                 Ok(false)
             }
         }
     }
 
-    /// Get ZFS version string
     pub async fn zfs_version(&self) -> Result<String> {
-        let output = Command::new("zpool")
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to run zpool --version: {e}")))?;
-        if !output.status.success() {
+        let (stdout, _, success) = self.runner.run("zpool", &["--version"], None).await?;
+        if !success {
             return Err(Error::Zfs("zpool --version failed".to_string()));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(stdout.trim().to_string())
     }
 
-    /// List all pools (imported and potentially importable)
     pub async fn list_pools(&self) -> Result<Vec<PoolInfo>> {
-        // Get imported pools first
-        let imported = self.list_imported_pools().await?;
-        Ok(imported)
+        self.list_imported_pools().await
     }
 
-    /// List currently imported pools with detailed info
     async fn list_imported_pools(&self) -> Result<Vec<PoolInfo>> {
-        let output = Command::new("zpool")
-            .args(["list", "-H", "-o", "name,size,allocated,free,health,guid"])
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to list pools: {e}")))?;
+        let (stdout, stderr, success) = self
+            .runner
+            .run("zpool", &["list", "-H", "-o", "name,size,allocated,free,health,guid"], None)
+            .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !success {
             return Err(Error::Zfs(format!("zpool list failed: {stderr}")));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let mut pools = Vec::new();
-
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 6 {
-                continue;
-            }
+            if parts.len() < 6 { continue; }
 
             let name = parts[0].to_string();
-            let size = Self::parse_zfs_size(parts[1]);
-            let allocated = Self::parse_zfs_size(parts[2]);
-            let free = Self::parse_zfs_size(parts[3]);
-            let health = Self::parse_health(parts[4]);
+            let size = parse_zfs_size(parts[1]);
+            let allocated = parse_zfs_size(parts[2]);
+            let free = parse_zfs_size(parts[3]);
+            let health = parse_health(parts[4]);
             let guid = parts[5].to_string();
 
-            // Get encryption and mount status via zfs get
             let encrypted = self.is_encrypted(&name).await.unwrap_or(false);
             let (mounted, mountpoint) = self.get_mount_info(&name).await.unwrap_or((false, None));
-
-            // Get datasets
             let datasets = self.list_datasets(&name).await.unwrap_or_default();
 
             pools.push(PoolInfo {
-                name,
-                guid,
-                health,
+                name, guid, health,
                 size_bytes: size,
                 allocated_bytes: allocated,
                 free_bytes: free,
-                encrypted,
-                mounted,
-                mountpoint,
+                encrypted, mounted, mountpoint,
                 datasets,
-                features: Vec::new(), // populated on demand
+                features: Vec::new(),
                 version: String::new(),
             });
         }
-
         Ok(pools)
     }
 
-    /// Find pools that can be imported (but are not currently imported)
     pub async fn find_importable_pools(&self, device_path: Option<&PathBuf>) -> Result<Vec<String>> {
-        let mut cmd = Command::new("zpool");
-        cmd.arg("import");
+        let mut args = vec!["import", "-N"];
+        let device_str;
         if let Some(dev) = device_path {
-            cmd.args(["-d", &dev.to_string_lossy()]);
+            device_str = dev.to_string_lossy().to_string();
+            args.push("-d");
+            args.push(&device_str);
         }
-        cmd.arg("-N"); // don't actually import, just list
 
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to scan for importable pools: {e}")))?;
+        let (stdout, _, _) = self.runner.run("zpool", &args, None).await?;
 
-        // zpool import returns non-zero if no pools found, which is fine
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let mut pools = Vec::new();
-
         for line in stdout.lines() {
-            // Parse output like: "   pool: tank"
             if let Some(stripped) = line.trim().strip_prefix("pool: ") {
                 pools.push(stripped.to_string());
             }
         }
-
         Ok(pools)
     }
 
-    /// Import a pool by name, optionally specifying the device path
     pub async fn import_pool(&self, name: &str, device_path: Option<&PathBuf>) -> Result<()> {
         info!("Importing pool: {name}");
-        let mut cmd = Command::new("zpool");
-        cmd.arg("import");
+        let mut args = vec!["import"];
+        let device_str;
         if let Some(dev) = device_path {
-            cmd.args(["-d", &dev.to_string_lossy()]);
+            device_str = dev.to_string_lossy().to_string();
+            args.push("-d");
+            args.push(&device_str);
         }
-        cmd.arg(name);
+        args.push(name);
 
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to import pool {name}: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let (_, stderr, success) = self.runner.run("zpool", &args, None).await?;
+        if !success {
             return Err(Error::Zfs(format!("zpool import failed: {stderr}")));
         }
-
         info!("Successfully imported pool: {name}");
         Ok(())
     }
 
-    /// Export a pool (safe unmount)
     pub async fn export_pool(&self, name: &str, force: bool) -> Result<()> {
         info!("Exporting pool: {name} (force={force})");
-        let mut cmd = Command::new("zpool");
-        cmd.arg("export");
-        if force {
-            cmd.arg("-f");
-        }
-        cmd.arg(name);
+        let mut args = vec!["export"];
+        if force { args.push("-f"); }
+        args.push(name);
 
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to export pool {name}: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let (_, stderr, success) = self.runner.run("zpool", &args, None).await?;
+        if !success {
             return Err(Error::Zfs(format!("zpool export failed: {stderr}")));
         }
-
         info!("Successfully exported pool: {name}");
         Ok(())
     }
 
-    /// Create a new ZFS pool with encryption
     pub async fn create_pool(
         &self,
         name: &str,
@@ -246,202 +167,294 @@ impl PoolManager {
     ) -> Result<()> {
         info!("Creating encrypted pool '{name}' on {device:?}");
 
-        let mut cmd = Command::new("zpool");
-        cmd.arg("create");
-        cmd.arg("-f"); // force (in case disk has existing data)
+        let mut args: Vec<String> = vec!["create".into(), "-f".into()];
 
-        // Pool-wide properties
         if options.disable_atime {
-            cmd.args(["-O", "atime=off"]);
+            args.push("-O".into()); args.push("atime=off".into());
         }
-        cmd.args(["-O", &format!("compression={}", options.compression)]);
-        cmd.args(["-O", &format!("recordsize={}K", options.recordsize_kb)]);
+        args.push("-O".into()); args.push(format!("compression={}", options.compression));
+        args.push("-O".into()); args.push(format!("recordsize={}K", options.recordsize_kb));
 
         if options.encryption {
-            cmd.args(["-O", "encryption=on"]);
-            cmd.args(["-O", &format!("encryption={}", options.algorithm)]);
-            cmd.args(["-O", "keyformat=passphrase"]);
-            cmd.args(["-O", "keylocation=prompt"]);
+            args.push("-O".into()); args.push("encryption=on".into());
+            args.push("-O".into()); args.push(format!("encryption={}", options.algorithm));
+            args.push("-O".into()); args.push("keyformat=passphrase".into());
+            args.push("-O".into()); args.push("keylocation=prompt".into());
         }
 
-        // Feature flags for cross-platform safety
         if options.cross_platform_safe {
             for feature in CROSS_PLATFORM_SAFE_FEATURES {
-                cmd.args(["-o", &format!("feature@{feature}=enabled")]);
+                args.push("-o".into()); args.push(format!("feature@{feature}=enabled"));
             }
             for feature in CROSS_PLATFORM_RISKY_FEATURES {
-                cmd.args(["-o", &format!("feature@{feature}=disabled")]);
+                args.push("-o".into()); args.push(format!("feature@{feature}=disabled"));
             }
         }
 
-        cmd.arg(name);
-        cmd.arg(device);
+        args.push(name.into());
+        args.push(device.to_string_lossy().to_string());
 
-        // Provide passphrase via stdin
-        cmd.stdin(Stdio::piped());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Zfs(format!("Failed to spawn zpool create: {e}")))?;
-
-        if let Some(stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let mut stdin = stdin;
-            stdin
-                .write_all(format!("{passphrase}\n").as_bytes())
-                .await
-                .map_err(|e| Error::Zfs(format!("Failed to send passphrase: {e}")))?;
-            stdin.shutdown().await.ok();
-        }
-
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| Error::Zfs(format!("zpool create failed: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let (_, stderr, success) = self.runner.run("zpool", &arg_refs, Some(passphrase)).await?;
+        if !success {
             return Err(Error::Zfs(format!("Pool creation failed: {stderr}")));
         }
-
         info!("Successfully created pool: {name}");
         Ok(())
     }
 
-    /// Check if a pool or dataset is encrypted
     async fn is_encrypted(&self, name: &str) -> Result<bool> {
-        let output = Command::new("zfs")
-            .args(["get", "-H", "-o", "value", "encryption", name])
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to check encryption: {e}")))?;
-
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let (stdout, _, success) = self
+            .runner
+            .run("zfs", &["get", "-H", "-o", "value", "encryption", name], None)
+            .await?;
+        if !success { return Ok(false); }
+        let value = stdout.trim();
         Ok(value != "off" && !value.is_empty() && value != "-" && !value.starts_with("cannot"))
     }
 
-    /// Get mount status and mountpoint
     async fn get_mount_info(&self, name: &str) -> Result<(bool, Option<PathBuf>)> {
-        let output = Command::new("zfs")
-            .args(["get", "-H", "-o", "value", "mounted,mountpoint", name])
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to get mount info: {e}")))?;
+        let (stdout, _, success) = self
+            .runner
+            .run("zfs", &["get", "-H", "-o", "value", "mounted,mountpoint", name], None)
+            .await?;
+        if !success { return Ok((false, None)); }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let lines: Vec<&str> = stdout.lines().collect();
-
         let mounted = lines.get(0).map(|s| s.trim() == "yes").unwrap_or(false);
         let mountpoint = lines.get(1).and_then(|s| {
             let s = s.trim();
-            if s == "none" || s == "-" || s.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(s))
-            }
+            if s == "none" || s == "-" || s.is_empty() { None } else { Some(PathBuf::from(s)) }
         });
-
         Ok((mounted, mountpoint))
     }
 
-    /// List datasets within a pool
     async fn list_datasets(&self, pool_name: &str) -> Result<Vec<DatasetInfo>> {
-        let output = Command::new("zfs")
-            .args([
-                "list",
-                "-H",
-                "-r",
-                "-o",
-                "name,mountpoint,mounted,encryption,compression,recordsize,quota",
-                pool_name,
-            ])
-            .output()
-            .await
-            .map_err(|e| Error::Zfs(format!("Failed to list datasets: {e}")))?;
+        let (stdout, _, success) = self.runner.run(
+            "zfs",
+            &["list", "-H", "-r", "-o", "name,mountpoint,mounted,encryption,compression,recordsize,quota", pool_name],
+            None,
+        ).await?;
+        if !success { return Ok(Vec::new()); }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
         let mut datasets = Vec::new();
-
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 7 {
-                continue;
-            }
-
-            let name = parts[0].to_string();
-            let mountpoint = if parts[1] == "none" || parts[1] == "-" {
-                None
-            } else {
-                Some(PathBuf::from(parts[1]))
-            };
-            let mounted = parts[2] == "yes";
-            let encrypted = parts[3] != "off" && parts[3] != "-";
-            let compression = if parts[4] == "off" || parts[4] == "-" {
-                None
-            } else {
-                Some(parts[4].to_string())
-            };
-            let recordsize = Some(Self::parse_zfs_size(parts[5]));
-            let quota = if parts[6] == "none" || parts[6] == "-" || parts[6] == "0" {
-                None
-            } else {
-                Some(Self::parse_zfs_size(parts[6]))
-            };
+            if parts.len() < 7 { continue; }
 
             datasets.push(DatasetInfo {
-                name,
-                mountpoint,
-                mounted,
-                encrypted,
-                compression,
-                recordsize,
-                quota,
+                name: parts[0].to_string(),
+                mountpoint: if parts[1] == "none" || parts[1] == "-" { None } else { Some(PathBuf::from(parts[1])) },
+                mounted: parts[2] == "yes",
+                encrypted: parts[3] != "off" && parts[3] != "-",
+                compression: if parts[4] == "off" || parts[4] == "-" { None } else { Some(parts[4].to_string()) },
+                recordsize: Some(parse_zfs_size(parts[5])),
+                quota: if parts[6] == "none" || parts[6] == "-" || parts[6] == "0" { None } else { Some(parse_zfs_size(parts[6])) },
             });
         }
-
         Ok(datasets)
-    }
-
-    /// Parse ZFS size strings like "1.5T", "500G", "128K"
-    fn parse_zfs_size(s: &str) -> u64 {
-        let s = s.trim();
-        if s == "-" || s.is_empty() {
-            return 0;
-        }
-
-        let multiplier = if s.ends_with('T') || s.ends_with('t') {
-            1024u64.pow(4)
-        } else if s.ends_with('G') || s.ends_with('g') {
-            1024u64.pow(3)
-        } else if s.ends_with('M') || s.ends_with('m') {
-            1024u64.pow(2)
-        } else if s.ends_with('K') || s.ends_with('k') {
-            1024
-        } else if s.ends_with('P') || s.ends_with('p') {
-            1024u64.pow(5)
-        } else {
-            1
-        };
-
-        let numeric: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-        numeric.parse::<f64>().unwrap_or(0.0) as u64 * multiplier
-    }
-
-    fn parse_health(s: &str) -> PoolHealth {
-        match s.trim().to_uppercase().as_str() {
-            "ONLINE" => PoolHealth::Online,
-            "DEGRADED" => PoolHealth::Degraded,
-            "FAULTED" => PoolHealth::Faulted,
-            "OFFLINE" => PoolHealth::Offline,
-            "UNAVAIL" | "UNAVAILABLE" => PoolHealth::Unavailable,
-            "REMOVED" => PoolHealth::Removed,
-            _ => PoolHealth::Unknown,
-        }
     }
 }
 
-impl Default for PoolManager {
-    fn default() -> Self {
-        Self::new()
+/// Parse ZFS size strings like "1.5T", "500G", "128K"
+pub fn parse_zfs_size(s: &str) -> u64 {
+    let s = s.trim();
+    if s == "-" || s.is_empty() { return 0; }
+
+    let multiplier = if s.ends_with('T') || s.ends_with('t') {
+        1024u64.pow(4)
+    } else if s.ends_with('G') || s.ends_with('g') {
+        1024u64.pow(3)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        1024u64.pow(2)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        1024
+    } else if s.ends_with('P') || s.ends_with('p') {
+        1024u64.pow(5)
+    } else {
+        1
+    };
+
+    let numeric: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let value = numeric.parse::<f64>().unwrap_or(0.0);
+    (value * multiplier as f64) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command::MockCommandRunner;
+
+    #[test]
+    fn test_parse_zfs_size() {
+        // 1.5T = 1.5 * 1024^4 = 1,649,267,441,664
+        assert_eq!(parse_zfs_size("1.5T"), 1_649_267_441_664);
+        assert_eq!(parse_zfs_size("500G"), 536_870_912_000);
+        assert_eq!(parse_zfs_size("128K"), 131_072);
+        assert_eq!(parse_zfs_size("8M"), 8_388_608);
+        assert_eq!(parse_zfs_size("-"), 0);
+        assert_eq!(parse_zfs_size(""), 0);
+        assert_eq!(parse_zfs_size("0"), 0);
+    }
+
+    #[test]
+    fn test_parse_health() {
+        assert!(matches!(parse_health("ONLINE"), PoolHealth::Online));
+        assert!(matches!(parse_health("DEGRADED"), PoolHealth::Degraded));
+        assert!(matches!(parse_health("FAULTED"), PoolHealth::Faulted));
+        assert!(matches!(parse_health("OFFLINE"), PoolHealth::Offline));
+        assert!(matches!(parse_health("UNAVAIL"), PoolHealth::Unavailable));
+        assert!(matches!(parse_health("REMOVED"), PoolHealth::Removed));
+        assert!(matches!(parse_health("UNKNOWN"), PoolHealth::Unknown));
+        assert!(matches!(parse_health("online"), PoolHealth::Online));
+    }
+
+    #[tokio::test]
+    async fn test_check_zfs_installed() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["--version"], "zfs-2.3.1", "", true);
+        let mgr = PoolManager::new(runner);
+        assert!(mgr.check_zfs_installed().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_check_zfs_not_installed() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["--version"], "", "command not found", false);
+        let mgr = PoolManager::new(runner);
+        assert!(!mgr.check_zfs_installed().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_zfs_version() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["--version"], "zfs-2.3.1", "", true);
+        let mgr = PoolManager::new(runner);
+        assert_eq!(mgr.zfs_version().await.unwrap(), "zfs-2.3.1");
+    }
+
+    #[tokio::test]
+    async fn test_list_pools() {
+        let runner = MockCommandRunner::new();
+        let stdout = "tank\t1.5T\t500G\t1T\tONLINE\t12345\n";
+        runner.add_response("zpool", &["list", "-H", "-o", "name,size,allocated,free,health,guid"], stdout, "", true);
+        runner.add_response("zfs", &["get", "-H", "-o", "value", "encryption", "tank"], "off\n", "", true);
+        runner.add_response("zfs", &["get", "-H", "-o", "value", "mounted,mountpoint", "tank"], "yes\n/Volumes/tank\n", "", true);
+        runner.add_response("zfs", &["list", "-H", "-r", "-o", "name,mountpoint,mounted,encryption,compression,recordsize,quota", "tank"], "", "", true);
+
+        let mgr = PoolManager::new(runner);
+        let pools = mgr.list_pools().await.unwrap();
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0].name, "tank");
+        assert_eq!(pools[0].health, PoolHealth::Online);
+        assert_eq!(pools[0].mounted, true);
+    }
+
+    #[tokio::test]
+    async fn test_import_pool() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["import", "tank"], "", "", true);
+        let mgr = PoolManager::new(runner.clone());
+        mgr.import_pool("tank", None).await.unwrap();
+
+        let calls = runner.get_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "zpool");
+        assert_eq!(calls[0].1, vec!["import", "tank"]);
+    }
+
+    #[tokio::test]
+    async fn test_import_pool_with_device() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["import", "-d", "/dev/sdb", "tank"], "", "", true);
+        let mgr = PoolManager::new(runner);
+        mgr.import_pool("tank", Some(&PathBuf::from("/dev/sdb"))).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_export_pool() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["export", "tank"], "", "", true);
+        let mgr = PoolManager::new(runner);
+        mgr.export_pool("tank", false).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_export_pool_force() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["export", "-f", "tank"], "", "", true);
+        let mgr = PoolManager::new(runner);
+        mgr.export_pool("tank", true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_pool() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["create", "-f", "-O", "atime=off", "-O", "compression=zstd", "-O", "recordsize=128K", "-O", "encryption=on", "-O", "encryption=aes-256-gcm", "-O", "keyformat=passphrase", "-O", "keylocation=prompt", "-o", "feature@allocation_classes=enabled", "-o", "feature@async_destroy=enabled", "-o", "feature@bookmarks=enabled", "-o", "feature@encryption=enabled", "-o", "feature@extensible_dataset=enabled", "-o", "feature@large_blocks=enabled", "-o", "feature@lz4_compress=enabled", "-o", "feature@spacemap_v2=enabled", "-o", "feature@zstd_compress=enabled", "-o", "feature@block_cloning_endian=disabled", "-o", "feature@fast_dedup=disabled", "-o", "feature@raidz_expansion=disabled", "-o", "feature@longname=disabled", "testpool", "/dev/sdb"], "", "", true);
+
+        let mgr = PoolManager::new(runner);
+        let options = PoolCreationOptions::default();
+        mgr.create_pool("testpool", &PathBuf::from("/dev/sdb"), "mypass", &options).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_find_importable_pools() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["import", "-N"], "pool: tank\n     id: 123\n", "", true);
+        let mgr = PoolManager::new(runner);
+        let pools = mgr.find_importable_pools(None).await.unwrap();
+        assert_eq!(pools, vec!["tank"]);
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_no_cross_platform() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["create", "-f", "-O", "atime=off", "-O", "compression=zstd", "-O", "recordsize=128K", "-O", "encryption=on", "-O", "encryption=aes-256-gcm", "-O", "keyformat=passphrase", "-O", "keylocation=prompt", "testpool2", "/dev/sdc"], "", "", true);
+
+        let mgr = PoolManager::new(runner);
+        let mut options = PoolCreationOptions::default();
+        options.cross_platform_safe = false;
+        mgr.create_pool("testpool2", &PathBuf::from("/dev/sdc"), "mypass", &options).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_imported_pools_empty() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["list", "-H", "-o", "name,size,allocated,free,health,guid"], "", "", true);
+        let mgr = PoolManager::new(runner);
+        let pools = mgr.list_pools().await.unwrap();
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_imported_pools_malformed_line() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["list", "-H", "-o", "name,size,allocated,free,health,guid"], "short_line\n", "", true);
+        let mgr = PoolManager::new(runner);
+        let pools = mgr.list_pools().await.unwrap();
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_no_encryption() {
+        let runner = MockCommandRunner::new();
+        runner.add_response("zpool", &["create", "-f", "-O", "atime=off", "-O", "compression=zstd", "-O", "recordsize=128K", "-o", "feature@allocation_classes=enabled", "-o", "feature@async_destroy=enabled", "-o", "feature@bookmarks=enabled", "-o", "feature@encryption=enabled", "-o", "feature@extensible_dataset=enabled", "-o", "feature@large_blocks=enabled", "-o", "feature@lz4_compress=enabled", "-o", "feature@spacemap_v2=enabled", "-o", "feature@zstd_compress=enabled", "-o", "feature@block_cloning_endian=disabled", "-o", "feature@fast_dedup=disabled", "-o", "feature@raidz_expansion=disabled", "-o", "feature@longname=disabled", "plainpool", "/dev/sdd"], "", "", true);
+
+        let mgr = PoolManager::new(runner);
+        let mut options = PoolCreationOptions::default();
+        options.encryption = false;
+        mgr.create_pool("plainpool", &PathBuf::from("/dev/sdd"), "", &options).await.unwrap();
+    }
+}
+
+pub fn parse_health(s: &str) -> PoolHealth {
+    match s.trim().to_uppercase().as_str() {
+        "ONLINE" => PoolHealth::Online,
+        "DEGRADED" => PoolHealth::Degraded,
+        "FAULTED" => PoolHealth::Faulted,
+        "OFFLINE" => PoolHealth::Offline,
+        "UNAVAIL" | "UNAVAILABLE" => PoolHealth::Unavailable,
+        "REMOVED" => PoolHealth::Removed,
+        _ => PoolHealth::Unknown,
     }
 }
